@@ -28,7 +28,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
+import shutil
 import signal
+import subprocess
 import sys
 from contextlib import contextmanager, suppress
 from pathlib import Path
@@ -61,6 +64,8 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger(__name__)
 
 PROCESS_NAME = "background-chat"
+NOTIFICATION_REPLACE_ID = "38291"
+ACTIVE_NOTIFICATION_TIMEOUT_MS = 86_400_000
 
 SYSTEM_PROMPT = """\
 You are a voice assistant. Your responses will be spoken aloud via text-to-speech.
@@ -115,6 +120,148 @@ If the message continues the previous conversation, use that context.
 If it is a new topic, ignore the previous conversation.
 Answer directly and concisely. Your response will be read aloud.
 """
+
+
+class _BackgroundChatNotifier:
+    """Manage persistent Linux desktop notifications for background-chat."""
+
+    def __init__(self) -> None:
+        self._command = shutil.which("dunstify") or shutil.which("notify-send")
+        self._gdbus = shutil.which("gdbus")
+        self._current_state: str | None = None
+        self._notification_id: int | None = None
+
+    def _notify(self, *, timeout_ms: int, body: str) -> None:
+        if self._command is None:
+            return
+
+        command = [
+            self._command,
+            "-p",
+            "-t",
+            str(timeout_ms),
+            "Background chat",
+            body,
+        ]
+        if self._notification_id is not None:
+            command[1:1] = ["-r", str(self._notification_id)]
+        elif self._command.endswith("notify-send"):
+            command[1:1] = ["-r", NOTIFICATION_REPLACE_ID]
+
+        with suppress(Exception):
+            result = subprocess.run(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+                text=True,
+                capture_output=False,
+            )
+
+    def _notify_persistent(self, body: str) -> None:
+        if self._gdbus is not None:
+            if self._notification_id is not None:
+                self.dismiss()
+            command = [
+                self._gdbus,
+                "call",
+                "--session",
+                "--dest",
+                "org.freedesktop.Notifications",
+                "--object-path",
+                "/org/freedesktop/Notifications",
+                "--method",
+                "org.freedesktop.Notifications.Notify",
+                "Background chat",
+                "0",
+                "",
+                "Background chat",
+                body,
+                "[]",
+                "{}",
+                str(ACTIVE_NOTIFICATION_TIMEOUT_MS),
+            ]
+            with suppress(Exception):
+                result = subprocess.run(
+                    command,
+                    capture_output=True,
+                    check=False,
+                    text=True,
+                )
+                match = re.search(r"uint32\s+(\d+)", result.stdout)
+                if match:
+                    self._notification_id = int(match.group(1))
+            return
+
+        if self._command is None:
+            return
+
+        command = [
+            self._command,
+            "-p",
+            "-h",
+            "boolean:resident:true",
+            "-t",
+            str(ACTIVE_NOTIFICATION_TIMEOUT_MS),
+            "Background chat",
+            body,
+        ]
+        if self._notification_id is not None:
+            command[1:1] = ["-r", str(self._notification_id)]
+        elif self._command.endswith("notify-send"):
+            command[1:1] = ["-r", NOTIFICATION_REPLACE_ID]
+
+        with suppress(Exception):
+            result = subprocess.run(
+                command,
+                capture_output=True,
+                check=False,
+                text=True,
+            )
+            notification_id = result.stdout.strip()
+            if notification_id.isdigit():
+                self._notification_id = int(notification_id)
+
+    def dismiss(self) -> None:
+        if self._notification_id is None:
+            return
+        if self._gdbus is None:
+            self._notification_id = None
+            return
+
+        with suppress(Exception):
+            subprocess.run(
+                [
+                    self._gdbus,
+                    "call",
+                    "--session",
+                    "--dest",
+                    "org.freedesktop.Notifications",
+                    "--object-path",
+                    "/org/freedesktop/Notifications",
+                    "--method",
+                    "org.freedesktop.Notifications.CloseNotification",
+                    str(self._notification_id),
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+        self._notification_id = None
+
+    def update(self, state: str) -> None:
+        if self._current_state == state:
+            return
+
+        self._current_state = state
+        if state == "listening":
+            self._notify_persistent("Listening")
+        elif state == "thinking":
+            self._notify_persistent("Thinking")
+        elif state == "talking":
+            self._notify_persistent("Talking")
+        elif state == "idle":
+            self.dismiss()
 
 
 @contextmanager
@@ -236,6 +383,10 @@ async def _async_main(
     listen_event = asyncio.Event()
     global_stop = asyncio.Event()
     turn_stop = InteractiveStopEvent()
+    notifier = _BackgroundChatNotifier()
+
+    def _set_state(state: str) -> None:
+        notifier.update(state)
 
     pid = process.read_pid_file(PROCESS_NAME)
     if not general_cfg.quiet:
@@ -252,6 +403,7 @@ async def _async_main(
         try:
             while not global_stop.is_set():
                 LOGGER.info("Entering idle -- waiting for listen trigger")
+                _set_state("idle")
                 await _wait_for_listen(listen_event, global_stop)
                 if global_stop.is_set():
                     LOGGER.info("Global stop set -- exiting loop")
@@ -284,6 +436,7 @@ async def _async_main(
                         live=live,
                         system_prompt=SYSTEM_PROMPT,
                         agent_instructions=AGENT_INSTRUCTIONS,
+                        on_state_change=_set_state,
                     )
                     LOGGER.info("Conversation turn completed normally")
                 except asyncio.CancelledError:
@@ -305,6 +458,8 @@ async def _async_main(
             if not isinstance(exc, (SystemExit, KeyboardInterrupt)):
                 LOGGER.exception("Unhandled exception escaped the main loop: %s", type(exc).__name__)
             raise
+        finally:
+            _set_state("idle")
 
 
 @app.command("background-chat", rich_help_panel="Voice Commands")

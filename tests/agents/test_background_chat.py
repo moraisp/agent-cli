@@ -18,10 +18,11 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from agent_cli.agents import background_chat as background_chat_module
 from agent_cli.core.utils import InteractiveStopEvent
 
 
@@ -786,3 +787,68 @@ async def test_listen_interrupts_tts_then_listen_stop(
     assert "tts_interrupted" in turn_phases[0], f"Turn 1 TTS should be interrupted: {turn_phases[0]}"
     # Turn 2: completed fully
     assert "tts_done" in turn_phases[1], f"Turn 2 should complete: {turn_phases[1]}"
+
+
+def test_notifier_persists_active_state_and_dismisses_on_idle() -> None:
+    """Active states should recreate notifications and idle should close them."""
+    calls: list[list[str]] = []
+
+    def fake_which(name: str) -> str | None:
+        if name == "notify-send":
+            return "/usr/bin/notify-send"
+        if name == "gdbus":
+            return "/usr/bin/gdbus"
+        return None
+
+    def fake_run(command: list[str], **_kwargs: Any) -> MagicMock:
+        calls.append(command)
+        if "org.freedesktop.Notifications.Notify" in command:
+            return MagicMock(stdout="(uint32 777,)\n")
+        return MagicMock(stdout="")
+
+    with (
+        patch.object(background_chat_module.shutil, "which", side_effect=fake_which),
+        patch.object(background_chat_module.subprocess, "run", side_effect=fake_run),
+    ):
+        notifier = background_chat_module._BackgroundChatNotifier()
+        notifier.update("listening")
+        notifier.update("thinking")
+        notifier.update("idle")
+
+    assert calls[0][0] == "/usr/bin/gdbus"
+    assert "org.freedesktop.Notifications.Notify" in calls[0]
+    assert calls[0][-4] == "Listening"
+    assert calls[1][0] == "/usr/bin/gdbus"
+    assert "org.freedesktop.Notifications.CloseNotification" in calls[1]
+    assert calls[1][-1] == "777"
+    assert calls[2][0] == "/usr/bin/gdbus"
+    assert "org.freedesktop.Notifications.Notify" in calls[2]
+    assert calls[2][10] == "0"
+    assert calls[2][-4] == "Thinking"
+    assert calls[3][0] == "/usr/bin/gdbus"
+    assert "org.freedesktop.Notifications.CloseNotification" in calls[3]
+    assert calls[3][-1] == "777"
+
+
+def test_notifier_skips_duplicate_state_updates() -> None:
+    """Repeated updates for the same state should not emit duplicate notifications."""
+    calls: list[list[str]] = []
+
+    def fake_which(name: str) -> str | None:
+        if name == "notify-send":
+            return "/usr/bin/notify-send"
+        return None
+
+    def fake_run(command: list[str], **_kwargs: Any) -> MagicMock:
+        calls.append(command)
+        return MagicMock(stdout="(uint32 555,)\n")
+
+    with (
+        patch.object(background_chat_module.shutil, "which", side_effect=fake_which),
+        patch.object(background_chat_module.subprocess, "run", side_effect=fake_run),
+    ):
+        notifier = background_chat_module._BackgroundChatNotifier()
+        notifier.update("listening")
+        notifier.update("listening")
+
+    assert len(calls) == 1

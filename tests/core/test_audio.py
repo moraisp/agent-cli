@@ -100,3 +100,25 @@ def test_run_with_timeout_exception_logs_warning(
 
     assert result is False
     assert "audio stream.close() failed" in caplog.text
+
+
+def test_format_recording_progress_shows_empty_meter_for_silence() -> None:
+    """Silent input should render an empty microphone meter."""
+    chunk = (0).to_bytes(2, byteorder="little", signed=True) * 32
+
+    message = audio._format_recording_progress("Listening", 1.2, chunk)
+
+    assert message == "Listening [░░░░░░░░]"
+
+
+def test_format_recording_progress_shows_fuller_meter_for_loud_input() -> None:
+    """Louder input should render a visibly fuller microphone meter."""
+    quiet_chunk = (500).to_bytes(2, byteorder="little", signed=True) * 32
+    loud_chunk = (20000).to_bytes(2, byteorder="little", signed=True) * 32
+
+    quiet_message = audio._format_recording_progress("Listening", 0.5, quiet_chunk)
+    loud_message = audio._format_recording_progress("Listening", 0.5, loud_chunk)
+
+    assert quiet_message.startswith("Listening [")
+    assert loud_message.startswith("Listening [")
+    assert quiet_message.count("█") < loud_message.count("█")

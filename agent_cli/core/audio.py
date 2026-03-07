@@ -32,6 +32,34 @@ LOGGER = logging.getLogger(__name__)
 _AUDIO_SHUTDOWN_TIMEOUT_SECONDS = 0.5
 
 
+def _normalized_audio_level(chunk: bytes) -> float:
+    """Estimate the current input level from 16-bit PCM audio."""
+    if not chunk:
+        return 0.0
+
+    samples = memoryview(chunk).cast("h")
+    if not samples:
+        return 0.0
+
+    peak = max(abs(sample) for sample in samples)
+    return min(1.0, peak / 32767)
+
+
+def _format_recording_progress(
+    progress_message: str,
+    seconds_streamed: float,
+    chunk: bytes,
+    *,
+    width: int = 8,
+) -> str:
+    """Format live capture progress with a simple input-level meter."""
+    _ = seconds_streamed
+    level = _normalized_audio_level(chunk)
+    filled = min(width, max(0, round(level * width)))
+    bar = "█" * filled + "░" * (width - filled)
+    return f"{progress_message} [{bar}]"
+
+
 @dataclass
 class StreamConfig:
     """Configuration for an audio stream."""
@@ -286,7 +314,7 @@ async def read_audio_stream(
                 else:
                     live.update(
                         Text(
-                            f"{progress_message}... ({seconds_streamed:.1f}s)",
+                            _format_recording_progress(progress_message, seconds_streamed, chunk),
                             style=progress_style,
                         ),
                     )

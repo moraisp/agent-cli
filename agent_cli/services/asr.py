@@ -232,12 +232,17 @@ async def _send_audio(
 
     # Buffer to save audio if requested
     audio_buffer = io.BytesIO() if save_recording else None
+    bytes_sent = 0
+    chunks_sent = 0
 
     async def send_chunk(chunk: bytes) -> None:
         """Send audio chunk to ASR server and optionally buffer it."""
+        nonlocal bytes_sent, chunks_sent
         if audio_buffer is not None:
             audio_buffer.write(chunk)
         await client.write_event(AudioChunk(audio=chunk, **constants.WYOMING_AUDIO_CONFIG).event())
+        bytes_sent += len(chunk)
+        chunks_sent += 1
 
     try:
         await read_audio_stream(
@@ -253,12 +258,21 @@ async def _send_audio(
     finally:
         await client.write_event(AudioStop().event())
         logger.debug("Sent AudioStop")
+        seconds_sent = bytes_sent / (constants.AUDIO_RATE * constants.AUDIO_CHANNELS * 2)
+        logger.info(
+            "Stopped live audio capture: chunks=%d bytes=%d duration=%.2fs stop_set=%s",
+            chunks_sent,
+            bytes_sent,
+            seconds_sent,
+            stop_event.is_set(),
+        )
 
         # Save the recording to disk if requested
         if save_recording and audio_buffer:
             audio_data = audio_buffer.getvalue()
             if audio_data:
-                _save_audio_to_file(audio_data, logger)
+                saved_path = _save_audio_to_file(audio_data, logger)
+                logger.debug("Saved live ASR capture to %s", saved_path)
 
 
 async def record_audio_to_buffer(queue: asyncio.Queue, logger: logging.Logger) -> bytes:
@@ -290,6 +304,8 @@ async def _receive_transcript(
     )
 
     transcript_text = ""
+    chunk_count = 0
+    chunk_chars = 0
     while True:
         event = await client.read_event()
         if event is None:
@@ -299,19 +315,36 @@ async def _receive_transcript(
         if Transcript.is_type(event.type):
             transcript = Transcript.from_event(event)
             transcript_text = transcript.text
-            logger.info("Final transcript: %s", transcript_text)
+            logger.info(
+                "Final transcript received: raw_len=%d stripped_len=%d chunks=%d chunk_chars=%d text=%r",
+                len(transcript_text),
+                len(transcript_text.strip()),
+                chunk_count,
+                chunk_chars,
+                transcript_text,
+            )
             if final_callback:
                 final_callback(transcript_text)
             break
         if TranscriptChunk.is_type(event.type):
             chunk = TranscriptChunk.from_event(event)
-            logger.debug("Transcript chunk: %s", chunk.text)
+            chunk_count += 1
+            chunk_chars += len(chunk.text)
+            logger.debug("Transcript chunk %d: %r", chunk_count, chunk.text)
             if chunk_callback:
                 chunk_callback(chunk.text)
         elif TranscriptStart.is_type(event.type) or TranscriptStop.is_type(event.type):
             logger.debug("Received %s", event.type)
         else:
             logger.debug("Ignoring event type: %s", event.type)
+
+    if not transcript_text.strip():
+        logger.warning(
+            "Transcript was empty after Wyoming ASR: chunks=%d chunk_chars=%d raw_text=%r",
+            chunk_count,
+            chunk_chars,
+            transcript_text,
+        )
 
     return transcript_text
 
@@ -427,6 +460,11 @@ async def _transcribe_live_audio_wyoming(
 ) -> str | None:
     """Unified ASR transcription function."""
     try:
+        logger.info(
+            "Starting Wyoming live transcription: device_index=%s save_recording=%s",
+            audio_input_cfg.input_device_index,
+            save_recording,
+        )
         async with wyoming_client_context(
             wyoming_asr_cfg.asr_wyoming_ip,
             wyoming_asr_cfg.asr_wyoming_port,
@@ -460,7 +498,13 @@ async def _transcribe_live_audio_wyoming(
                     ),
                     return_when=asyncio.ALL_COMPLETED,
                 )
-                return recv_task.result()
+                transcript = recv_task.result()
+                logger.info(
+                    "Completed Wyoming live transcription: raw_len=%s stripped_len=%s",
+                    None if transcript is None else len(transcript),
+                    None if transcript is None else len(transcript.strip()),
+                )
+                return transcript
     except (ConnectionRefusedError, Exception):
         logger.warning("Failed to connect to Wyoming ASR server")
         return None

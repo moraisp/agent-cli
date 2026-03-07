@@ -51,6 +51,8 @@ from agent_cli.services.llm import get_llm_response
 from agent_cli.services.tts import handle_tts_playback
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from rich.live import Live
 
 
@@ -169,9 +171,14 @@ async def _handle_conversation_turn(
     live: Live,
     system_prompt: str = SYSTEM_PROMPT,
     agent_instructions: str = AGENT_INSTRUCTIONS,
+    on_state_change: Callable[[str], None] | None = None,
 ) -> None:
     """Handles a single turn of the conversation."""
+    if on_state_change is not None:
+        on_state_change("listening")
+
     # 1. Transcribe user's command
+    LOGGER.info("Starting conversation turn transcription")
     start_time = time.monotonic()
     transcriber = asr.create_transcriber(
         provider_cfg,
@@ -187,11 +194,18 @@ async def _handle_conversation_turn(
         logger=LOGGER,
     )
     elapsed = time.monotonic() - start_time
+    LOGGER.info(
+        "Transcription completed: raw_len=%s stripped_len=%s elapsed=%.2fs",
+        None if instruction is None else len(instruction),
+        None if instruction is None else len(instruction.strip()),
+        elapsed,
+    )
 
     # Clear the stop event after ASR completes - it was only meant to stop recording
     stop_event.clear()
 
     if not instruction or not instruction.strip():
+        LOGGER.warning("No usable instruction after transcription; returning to idle")
         if not general_cfg.quiet:
             print_with_style(
                 "No instruction, listening again.",
@@ -219,6 +233,8 @@ async def _handle_conversation_turn(
     )
 
     # 4. Get LLM response with timing
+    if on_state_change is not None:
+        on_state_change("thinking")
 
     start_time = time.monotonic()
 
@@ -283,6 +299,8 @@ async def _handle_conversation_turn(
 
     # 7. Handle TTS playback
     if audio_out_cfg.enable_tts:
+        if on_state_change is not None:
+            on_state_change("talking")
         await handle_tts_playback(
             text=response_text,
             provider_cfg=provider_cfg,
