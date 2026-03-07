@@ -75,6 +75,93 @@ def clear_stop_file(process_name: str) -> None:
         stop_file.unlink()
 
 
+def _get_listen_file(process_name: str) -> Path:
+    """Get the path to the listen trigger file for a given process name."""
+    PID_DIR.mkdir(parents=True, exist_ok=True)
+    return PID_DIR / f"{process_name}.listen"
+
+
+def check_listen_file(process_name: str) -> bool:
+    """Check if a listen trigger file exists."""
+    return _get_listen_file(process_name).exists()
+
+
+def clear_listen_file(process_name: str) -> None:
+    """Remove the listen trigger file."""
+    listen_file = _get_listen_file(process_name)
+    if listen_file.exists():
+        listen_file.unlink()
+
+
+def trigger_listen(process_name: str) -> bool:
+    """Trigger a listen session in a running background-chat process.
+
+    On Windows, creates a listen file for cross-process signaling.
+    On Unix, sends SIGUSR1 to the process.
+
+    Returns True if the trigger was sent successfully.
+    """
+    if sys.platform == "win32":
+        if not is_process_running(process_name):
+            return False
+        _get_listen_file(process_name).touch()
+        return True
+
+    pid = _get_running_pid(process_name)
+    if pid is None:
+        return False
+    try:
+        os.kill(pid, signal.SIGUSR1)
+        return True
+    except (ProcessLookupError, PermissionError):
+        return False
+
+
+def trigger_listen_stop(process_name: str) -> bool:
+    """Signal a running background-chat process to stop recording.
+
+    Tells the ASR to finalize the current recording so the LLM response
+    and TTS playback can begin.  Used for push-to-talk key-up.
+
+    On Windows, creates a listen-stop file for cross-process signaling.
+    On Unix, sends SIGUSR2 to the process.
+
+    Returns True if the signal was sent successfully.
+    """
+    if sys.platform == "win32":
+        if not is_process_running(process_name):
+            return False
+        _get_listen_stop_file(process_name).touch()
+        return True
+
+    pid = _get_running_pid(process_name)
+    if pid is None:
+        return False
+    try:
+        os.kill(pid, signal.SIGUSR2)
+        return True
+    except (ProcessLookupError, PermissionError):
+        return False
+
+
+def _get_listen_stop_file(process_name: str) -> Path:
+    """Get the listen-stop trigger file path."""
+    PID_DIR.mkdir(parents=True, exist_ok=True)
+    return PID_DIR / f"{process_name}.listen-stop"
+
+
+def check_listen_stop_file(process_name: str) -> bool:
+    """Check if a listen-stop trigger file exists."""
+    return _get_listen_stop_file(process_name).exists()
+
+
+def clear_listen_stop_file(process_name: str) -> None:
+    """Remove the listen-stop trigger file."""
+    f = _get_listen_stop_file(process_name)
+    if f.exists():
+        f.unlink()
+
+
 def _is_pid_running(pid: int) -> bool:
     """Check if a process with the given PID is running."""
     if sys.platform == "win32":
@@ -152,9 +239,9 @@ def kill_process(process_name: str) -> bool:
     if sys.platform == "win32":
         stop_file.touch()
 
-    # Send SIGINT first; escalate to SIGKILL only when the same PID survives
+    # Send SIGTERM first; escalate to SIGKILL only when the same PID survives
     # repeated stop attempts beyond the configured timeout.
-    stop_signal = signal.SIGKILL if should_force_kill else signal.SIGINT
+    stop_signal = signal.SIGKILL if should_force_kill else signal.SIGTERM
     process_stopped = False
     try:
         os.kill(pid, stop_signal)

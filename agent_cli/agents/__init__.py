@@ -3,6 +3,7 @@
 from . import (
     assistant,
     autocorrect,
+    background_chat,
     chat,
     memory,
     rag_proxy,
@@ -14,6 +15,7 @@ from . import (
 __all__ = [
     "assistant",
     "autocorrect",
+    "background_chat",
     "chat",
     "memory",
     "rag_proxy",

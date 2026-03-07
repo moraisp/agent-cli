@@ -116,6 +116,7 @@ from . import config_cmd  # noqa: E402, F401
 from .agents import (  # noqa: E402, F401
     assistant,
     autocorrect,
+    background_chat,
     chat,
     memory,
     rag_proxy,

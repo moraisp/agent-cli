@@ -339,6 +339,20 @@ TOGGLE: bool = typer.Option(
     help="Start if not running, stop if running. Ideal for hotkey binding.",
     rich_help_panel="Process Management",
 )
+LISTEN: bool = typer.Option(
+    False,  # noqa: FBT003
+    "--listen",
+    help="Trigger a listen session in the running background-chat process. "
+    "Interrupts TTS if active and starts listening immediately.",
+    rich_help_panel="Process Management",
+)
+LISTEN_STOP: bool = typer.Option(
+    False,  # noqa: FBT003
+    "--listen-stop",
+    help="Stop recording and start processing the response. "
+    "Use with --listen for push-to-talk (key-down=listen, key-up=listen-stop).",
+    rich_help_panel="Process Management",
+)
 
 # --- General Options ---
 

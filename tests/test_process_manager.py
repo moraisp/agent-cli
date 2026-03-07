@@ -111,7 +111,7 @@ def test_kill_process_success(
 
     result = process.kill_process(process_name)
     assert result is True
-    mock_os_kill.assert_any_call(current_pid, signal.SIGINT)
+    mock_os_kill.assert_any_call(current_pid, signal.SIGTERM)
     assert mock_is_pid_running.call_count >= 2
     assert not pid_file.exists()
 
@@ -125,7 +125,7 @@ def test_kill_process_keeps_pid_file_while_process_is_still_running(
     mock_is_pid_running: MagicMock,
     mock_sleep: MagicMock,  # noqa: ARG001
 ) -> None:
-    """PID file should remain if the process does not stop after SIGINT."""
+    """PID file should remain if the process does not stop after SIGTERM."""
     process_name = "test-process"
     pid_file = process._get_pid_file(process_name)
     current_pid = os.getpid()
@@ -134,7 +134,7 @@ def test_kill_process_keeps_pid_file_while_process_is_still_running(
     result = process.kill_process(process_name)
 
     assert result is True
-    mock_os_kill.assert_any_call(current_pid, signal.SIGINT)
+    mock_os_kill.assert_any_call(current_pid, signal.SIGTERM)
     assert mock_is_pid_running.call_count >= 1
     assert pid_file.exists()
     stop_file = process._get_stop_file(process_name)

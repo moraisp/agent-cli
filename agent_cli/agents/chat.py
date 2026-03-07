@@ -167,6 +167,8 @@ async def _handle_conversation_turn(
     kokoro_tts_cfg: config.KokoroTTS,
     gemini_tts_cfg: config.GeminiTTS,
     live: Live,
+    system_prompt: str = SYSTEM_PROMPT,
+    agent_instructions: str = AGENT_INSTRUCTIONS,
 ) -> None:
     """Handles a single turn of the conversation."""
     # 1. Transcribe user's command
@@ -234,8 +236,8 @@ async def _handle_conversation_turn(
         stop_event=stop_event,
     ):
         response_text = await get_llm_response(
-            system_prompt=SYSTEM_PROMPT,
-            agent_instructions=AGENT_INSTRUCTIONS,
+            system_prompt=system_prompt,
+            agent_instructions=agent_instructions,
             user_input=user_message_with_context,
             provider_cfg=provider_cfg,
             ollama_cfg=ollama_cfg,
