@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 import time
 from typing import TYPE_CHECKING
@@ -11,7 +12,6 @@ from rich.live import Live
 from agent_cli.core.utils import console, live_timer, print_error_message, print_output_panel
 
 if TYPE_CHECKING:
-    import logging
     from collections.abc import Sequence
 
     from pydantic_ai import Agent
@@ -21,6 +21,32 @@ if TYPE_CHECKING:
     from pydantic_ai.tools import Tool
 
     from agent_cli import config
+
+
+# Module-level storage for the last LLM run's tool calls.
+_last_tool_calls: list[str] = []
+
+
+def _extract_tool_calls(result: object, logger: logging.Logger) -> None:
+    """Extract tool call names from an LLM result into module-level storage."""
+    global _last_tool_calls  # noqa: PLW0603
+    from pydantic_ai.messages import ToolCallPart  # noqa: PLC0415
+
+    _last_tool_calls = []
+    for msg in result.all_messages():
+        for part in getattr(msg, "parts", []):
+            if isinstance(part, ToolCallPart):
+                _last_tool_calls.append(part.tool_name)
+    if _last_tool_calls:
+        logger.info("Tools called: %s", ", ".join(_last_tool_calls))
+
+
+def get_and_clear_tool_calls() -> list[str]:
+    """Return and clear the tool calls from the last LLM run."""
+    global _last_tool_calls  # noqa: PLW0603
+    calls = _last_tool_calls
+    _last_tool_calls = []
+    return calls
 
 
 def _openai_llm_model(openai_cfg: config.OpenAILLM) -> OpenAIModel:
@@ -152,6 +178,9 @@ async def get_llm_response(
             quiet=quiet,
         ):
             result = await agent.run(user_input)
+
+        # Extract tool calls for callers to display
+        _extract_tool_calls(result, logger)
 
         elapsed = time.monotonic() - start_time
         result_text = result.output

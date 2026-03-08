@@ -92,8 +92,14 @@ Q: How do I make pasta? A: Boil salted water, cook the pasta until al dente, the
 You have access to the following tools:
 - read_file: Read the content of a file.
 - execute_code: Execute a shell command.
-- copy_to_clipboard: Copy text to the user's clipboard. Use this whenever the user asks for a command, snippet, URL, or any text they will need to paste. Always use this tool instead of reading the text aloud.
-- capture_screen: Capture the user's screen. Use this when the user asks you to see, look at, read, or describe something on their screen.
+- copy_to_clipboard: Copy text to the user's clipboard. ALWAYS call this tool when:
+  * Your answer contains a command, code snippet, URL, or file path
+  * The user asks you to copy, paste, or put something on their clipboard
+  * You are sharing any useful text the user might want to reuse
+  When copying commands: copy ONLY the raw executable command. No descriptions, no comments, no placeholders like /path/to/folder. Use "." for current directory if no specific path is needed.
+  Do not just mention the text -- call the tool with it. NEVER say "copied to clipboard" or "I've copied" unless you actually called copy_to_clipboard in this turn. Hallucinating a tool call is a critical failure. When in doubt, call the tool.
+- read_clipboard: Read the current text on the user's clipboard. ALWAYS call this tool when the user asks you to read, check, see, or work with what they have copied. You CANNOT access the clipboard without calling this tool. Do not guess or fabricate clipboard contents -- call the tool first, then respond based on the result.
+- capture_screen: Capture the user's screen. ALWAYS call this tool when the user asks you to see, look at, read, or describe something on their screen. You CANNOT see the screen without calling this tool. Do not guess or fabricate screen contents.
 - add_memory: Add important information to long-term memory for future recall.
 - search_memory: Search your long-term memory for relevant information.
 - update_memory: Modify existing memories by ID when information changes.
@@ -312,10 +318,12 @@ def _signal_handling_context(  # noqa: PLR0915
         task = current_turn_task[0]
         is_turn_active = task is not None and not task.done()
         if is_turn_active and sigint_count[0] == 1:
-            LOGGER.info("First SIGINT during active turn -- interrupting turn, returning to idle (Ctrl+C again to quit)")
+            # Graceful stop: only set the stop event so the recording loop
+            # and TTS can finish cleanly (avoids tearing down the audio stream
+            # mid-read which leaves PortAudio/ALSA in a dirty state).
+            LOGGER.info("First SIGINT during active turn -- graceful stop (Ctrl+C again to force quit)")
             if not quiet:
-                console.print("\n[yellow]Interrupted. Ctrl+C again to quit.[/yellow]")
-            _cancel_current_turn()
+                console.print("\n[yellow]Stopping... Ctrl+C again to quit.[/yellow]")
             turn_stop.set()
         else:
             LOGGER.info("SIGINT -- shutting down")
@@ -325,6 +333,9 @@ def _signal_handling_context(  # noqa: PLR0915
             global_stop.set()
             turn_stop.set()
             listen_event.set()
+            # Schedule a hard exit -- sys.exit raises SystemExit which
+            # asyncio.run handles by cancelling tasks and shutting down.
+            loop.call_soon(sys.exit, 0)
 
     if sys.platform != "win32":
         loop.add_signal_handler(signal.SIGUSR1, _sigusr1)
@@ -486,7 +497,7 @@ async def _async_main(  # noqa: PLR0912, PLR0915
                     with suppress(Exception):
                         print_with_style("Idle -- waiting for listen trigger.", style="dim blue")
         except BaseException as exc:
-            if not isinstance(exc, (SystemExit, KeyboardInterrupt)):
+            if not isinstance(exc, (SystemExit, KeyboardInterrupt, asyncio.CancelledError)):
                 LOGGER.exception("Unhandled exception escaped the main loop: %s", type(exc).__name__)
             raise
         finally:

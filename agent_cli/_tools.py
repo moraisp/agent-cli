@@ -375,55 +375,42 @@ def copy_to_clipboard(text: str) -> str:
         Confirmation message with the copied text.
 
     """
+    import pyperclip  # noqa: PLC0415
+
     LOGGER.info("copy_to_clipboard called with %d chars: %r", len(text), text[:200])
-
-    # Wayland
-    wl_copy = shutil.which("wl-copy")
-    if wl_copy is not None:
-        try:
-            result = subprocess.run(
-                [wl_copy],
-                input=text,
-                text=True,
-                check=True,
-                capture_output=True,
-                env={**os.environ},
-            )
-            LOGGER.info("wl-copy succeeded")
-            if result.stderr:
-                LOGGER.warning("wl-copy stderr: %s", result.stderr)
-            return f"Copied to clipboard: {text}"
-        except subprocess.CalledProcessError as e:
-            LOGGER.error("wl-copy failed: %s", e.stderr)
-            return f"Error copying to clipboard: {e.stderr}"
-
-    # X11
-    xclip = shutil.which("xclip")
-    if xclip is not None:
-        try:
-            subprocess.run(
-                [xclip, "-selection", "clipboard"],
-                input=text,
-                text=True,
-                check=True,
-                capture_output=True,
-            )
-            LOGGER.info("xclip succeeded")
-            return f"Copied to clipboard: {text}"
-        except subprocess.CalledProcessError as e:
-            LOGGER.error("xclip failed: %s", e.stderr)
-            return f"Error copying to clipboard: {e.stderr}"
-
-    # Fallback: pyperclip
     try:
-        import pyperclip  # noqa: PLC0415
-
         pyperclip.copy(text)
-        LOGGER.info("pyperclip succeeded")
+        LOGGER.info("pyperclip copy succeeded")
         return f"Copied to clipboard: {text}"
     except Exception as e:
-        LOGGER.error("pyperclip failed: %s", e)
+        LOGGER.error("clipboard copy failed: %s", e)
         return f"Error copying to clipboard: {e}"
+
+
+def read_clipboard() -> str:
+    """Read the current contents of the user's clipboard.
+
+    Use this tool when the user asks you to:
+    - Read, check, or look at what's on their clipboard
+    - Paste or show clipboard contents
+    - Work with text they have copied
+
+    Returns:
+        The current clipboard text, or an error message.
+
+    """
+    import pyperclip  # noqa: PLC0415
+
+    LOGGER.info("read_clipboard called")
+    try:
+        text = pyperclip.paste()
+        if not text:
+            return "Clipboard is empty."
+        LOGGER.info("read_clipboard got %d chars", len(text))
+        return f"Clipboard contents:\n{text}"
+    except Exception as e:
+        LOGGER.error("clipboard read failed: %s", e)
+        return f"Error reading clipboard: {e}"
 
 
 def capture_screen() -> str:
@@ -486,6 +473,7 @@ def tools() -> list:
         Tool(list_all_memories),
         Tool(list_memory_categories),
         Tool(copy_to_clipboard),
+        Tool(read_clipboard),
         Tool(capture_screen),
         duckduckgo_search_tool(),
     ]

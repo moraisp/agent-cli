@@ -48,7 +48,7 @@ from agent_cli.core.utils import (
     stop_or_status_or_toggle,
 )
 from agent_cli.services import asr
-from agent_cli.services.llm import get_llm_response
+from agent_cli.services.llm import get_and_clear_tool_calls, get_llm_response
 from agent_cli.services.tts import handle_tts_playback
 
 if TYPE_CHECKING:
@@ -176,6 +176,50 @@ def _strip_for_tts(text: str) -> str:
     # Collapse multiple spaces / leading/trailing whitespace
     text = re.sub(r" {2,}", " ", text).strip()
     return text
+
+
+# Pattern that matches common shell commands / code snippets embedded in text.
+# Looks for backtick-wrapped code first, then "command: <cmd>", "use: <cmd>", etc.
+_COMMAND_EXTRACT_RE = re.compile(
+    r"(?:"
+    r"`([^`]+)`"
+    r"|"
+    r"(?:use|run|try|execute|command|type):\s*([a-z/~.$][\w\s./$*{}<>|&;:~\-\"'=]+)"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _maybe_auto_copy_command(response_text: str, tool_calls: list[str], logger: logging.Logger) -> bool:
+    """Auto-copy command-like text to clipboard if the LLM didn't call copy_to_clipboard."""
+    if "copy_to_clipboard" in tool_calls:
+        return False
+
+    match = _COMMAND_EXTRACT_RE.search(response_text)
+    if not match:
+        return False
+
+    backtick = match.group(1)
+    keyword = match.group(2)
+    if backtick:
+        command = backtick.strip()
+    else:
+        # Strip trailing description: "ls -la /tmp This shows..." → "ls -la /tmp"
+        # Heuristic: cut at first uppercase letter after a space (start of sentence).
+        cleaned = re.split(r"\s+(?=[A-Z])", keyword.strip(), maxsplit=1)[0]
+        command = cleaned.rstrip(".")
+    if len(command) < 3:
+        return False
+
+    try:
+        import pyperclip  # noqa: PLC0415
+
+        pyperclip.copy(command)
+        logger.info("Auto-copied command to clipboard: %r", command)
+        return True
+    except Exception:
+        logger.warning("Auto-copy to clipboard failed", exc_info=True)
+        return False
 
 
 async def _handle_conversation_turn(
@@ -332,10 +376,21 @@ async def _handle_conversation_turn(
 
     elapsed = time.monotonic() - start_time
 
+    # Show tool calls after the live_timer context has exited
+    tool_calls = get_and_clear_tool_calls()
+
     if not response_text:
         if not general_cfg.quiet:
             print_with_style("No response from LLM.", style="yellow")
         return
+
+    # Auto-copy commands to clipboard if the LLM forgot to call the tool
+    if _maybe_auto_copy_command(response_text, tool_calls, LOGGER):
+        tool_calls.append("copy_to_clipboard (auto)")
+
+    if tool_calls and not general_cfg.quiet:
+        summary = ", ".join(tool_calls)
+        print_with_style(f"Tools called: {summary}", style="dim")
 
     if not general_cfg.quiet:
         print_output_panel(
