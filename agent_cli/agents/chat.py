@@ -18,6 +18,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from contextlib import suppress
 from datetime import UTC, datetime
@@ -149,6 +150,34 @@ def _format_conversation_for_llm(history: list[ConversationEntry]) -> str:
     return "\n".join(formatted_lines)
 
 
+# Regex matching emoji Unicode ranges and common markdown/formatting characters.
+_EMOJI_AND_FORMAT_RE = re.compile(
+    "["
+    "\U0001f600-\U0001f64f"  # emoticons
+    "\U0001f300-\U0001f5ff"  # misc symbols & pictographs
+    "\U0001f680-\U0001f6ff"  # transport & map
+    "\U0001f1e0-\U0001f1ff"  # flags
+    "\U0001f900-\U0001f9ff"  # supplemental symbols
+    "\U0001fa00-\U0001fa6f"  # chess, extended-A
+    "\U0001fa70-\U0001faff"  # extended-A continued
+    "\U00002702-\U000027b0"  # dingbats
+    "\U0000fe00-\U0000fe0f"  # variation selectors
+    "\U0000200d"             # zero-width joiner
+    "]+",
+    flags=re.UNICODE,
+)
+_MARKDOWN_RE = re.compile(r"[*#`~_\[\]()>|]")
+
+
+def _strip_for_tts(text: str) -> str:
+    """Remove emojis, markdown formatting, and special characters before TTS."""
+    text = _EMOJI_AND_FORMAT_RE.sub("", text)
+    text = _MARKDOWN_RE.sub("", text)
+    # Collapse multiple spaces / leading/trailing whitespace
+    text = re.sub(r" {2,}", " ", text).strip()
+    return text
+
+
 async def _handle_conversation_turn(
     *,
     stop_event: InteractiveStopEvent,
@@ -172,7 +201,6 @@ async def _handle_conversation_turn(
     system_prompt: str = SYSTEM_PROMPT,
     agent_instructions: str = AGENT_INSTRUCTIONS,
     on_state_change: Callable[[str], None] | None = None,
-    capture_screen_fn: Callable[[str], bytes | None] | None = None,
 ) -> None:
     """Handles a single turn of the conversation."""
     if on_state_change is not None:
@@ -233,17 +261,10 @@ async def _handle_conversation_turn(
         instruction=instruction,
     )
 
-    # Build multimodal prompt if a screenshot is attached
-    screenshot = capture_screen_fn(instruction) if capture_screen_fn is not None else None
-    if screenshot is not None:
-        from pydantic_ai import BinaryContent  # noqa: PLC0415
+    # Clear any leftover screenshot from a previous turn
+    from agent_cli._tools import get_and_clear_screenshot  # noqa: PLC0415
 
-        user_input: str | list = [
-            user_message_with_context,
-            BinaryContent(data=screenshot, media_type="image/png"),
-        ]
-    else:
-        user_input = user_message_with_context
+    get_and_clear_screenshot()
 
     # 4. Get LLM response with timing
     if on_state_change is not None:
@@ -267,7 +288,7 @@ async def _handle_conversation_turn(
         response_text = await get_llm_response(
             system_prompt=system_prompt,
             agent_instructions=agent_instructions,
-            user_input=user_input,
+            user_input=user_message_with_context,
             provider_cfg=provider_cfg,
             ollama_cfg=ollama_cfg,
             openai_cfg=openai_llm_cfg,
@@ -277,6 +298,37 @@ async def _handle_conversation_turn(
             quiet=True,  # Suppress internal output since we're showing our own timer
             live=live,
         )
+
+    # If the LLM called capture_screen, re-run with the image attached
+    screenshot_data = get_and_clear_screenshot()
+    if screenshot_data is not None:
+        from pydantic_ai import BinaryContent  # noqa: PLC0415
+
+        LOGGER.info("Screenshot captured by tool (%d bytes) -- re-running with image", len(screenshot_data))
+        user_input_with_image: str | list = [
+            user_message_with_context,
+            BinaryContent(data=screenshot_data, media_type="image/png"),
+        ]
+        async with live_timer(
+            live,
+            f"\U0001f441 Analyzing screenshot with {model_name}",
+            style="bold yellow",
+            quiet=general_cfg.quiet,
+            stop_event=stop_event,
+        ):
+            response_text = await get_llm_response(
+                system_prompt=system_prompt,
+                agent_instructions=agent_instructions,
+                user_input=user_input_with_image,
+                provider_cfg=provider_cfg,
+                ollama_cfg=ollama_cfg,
+                openai_cfg=openai_llm_cfg,
+                gemini_cfg=gemini_llm_cfg,
+                logger=LOGGER,
+                tools=tools(),
+                quiet=True,
+                live=live,
+            )
 
     elapsed = time.monotonic() - start_time
 
@@ -314,8 +366,9 @@ async def _handle_conversation_turn(
     if audio_out_cfg.enable_tts:
         if on_state_change is not None:
             on_state_change("talking")
+        tts_text = _strip_for_tts(response_text)
         await handle_tts_playback(
-            text=response_text,
+            text=tts_text,
             provider_cfg=provider_cfg,
             audio_output_cfg=audio_out_cfg,
             wyoming_tts_cfg=wyoming_tts_cfg,

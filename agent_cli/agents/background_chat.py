@@ -92,6 +92,8 @@ Q: How do I make pasta? A: Boil salted water, cook the pasta until al dente, the
 You have access to the following tools:
 - read_file: Read the content of a file.
 - execute_code: Execute a shell command.
+- copy_to_clipboard: Copy text to the user's clipboard. Use this whenever the user asks for a command, snippet, URL, or any text they will need to paste. Always use this tool instead of reading the text aloud.
+- capture_screen: Capture the user's screen. Use this when the user asks you to see, look at, read, or describe something on their screen.
 - add_memory: Add important information to long-term memory for future recall.
 - search_memory: Search your long-term memory for relevant information.
 - update_memory: Modify existing memories by ID when information changes.
@@ -114,60 +116,6 @@ If it is a new topic, ignore the previous conversation.
 Respond in one or two sentences maximum. No formatting, no emojis, plain text only.
 If an image is attached, use it to answer the user's question. Describe only what is asked about.
 """
-
-# Regex matching voice commands that request vision / screen reading.
-_VISION_PATTERN = re.compile(
-    r"\b(?:see|look|look at|read this|read that|what(?:'s| is) (?:this|that|on (?:my |the )?screen)"
-    r"|show me|what do you see|what am i looking at|describe (?:this|that|the screen|what you see))\b",
-    re.IGNORECASE,
-)
-
-
-def _needs_vision(text: str) -> bool:
-    """Return True if the transcribed text implies the user wants screen analysis."""
-    return _VISION_PATTERN.search(text) is not None
-
-
-def _capture_screen() -> bytes | None:
-    """Capture the screen and return PNG bytes, or None on failure."""
-    grim = shutil.which("grim")
-    if grim is not None:
-        # Wayland -- grim writes PNG to stdout with "-"
-        result = subprocess.run(
-            [grim, "-"],
-            capture_output=True,
-            check=False,
-        )
-        if result.returncode == 0 and result.stdout:
-            return result.stdout
-
-    scrot = shutil.which("scrot")
-    if scrot is not None:
-        # X11 -- scrot writes PNG to stdout with "-"
-        result = subprocess.run(
-            [scrot, "-"],
-            capture_output=True,
-            check=False,
-        )
-        if result.returncode == 0 and result.stdout:
-            return result.stdout
-
-    LOGGER.warning("No screenshot tool found (tried grim, scrot)")
-    return None
-
-
-def _maybe_capture_screen(text: str) -> bytes | None:
-    """Capture the screen if the transcribed text implies a vision request."""
-    if not _needs_vision(text):
-        return None
-    LOGGER.info("Vision trigger detected in: %r -- capturing screen", text)
-    screenshot = _capture_screen()
-    if screenshot is None:
-        LOGGER.warning("Screen capture failed or no tool available")
-    else:
-        LOGGER.info("Screen captured: %d bytes", len(screenshot))
-    return screenshot
-
 
 class _BackgroundChatNotifier:
     """Manage persistent Linux desktop notifications for background-chat."""
@@ -360,17 +308,17 @@ def _signal_handling_context(  # noqa: PLR0915
 
     def _sigint() -> None:
         sigint_count[0] += 1
-        if sigint_count[0] == 1:
-            # First Ctrl+C: interrupt the current turn only, return to idle.
-            # Do NOT set global_stop or listen_event — the process keeps running
-            # and waits for the next --listen trigger.
-            LOGGER.info("First SIGINT -- interrupting current turn, returning to idle (Ctrl+C again or --stop to quit)")
+        # If no turn is running (idle), quit immediately on first Ctrl+C.
+        task = current_turn_task[0]
+        is_turn_active = task is not None and not task.done()
+        if is_turn_active and sigint_count[0] == 1:
+            LOGGER.info("First SIGINT during active turn -- interrupting turn, returning to idle (Ctrl+C again to quit)")
             if not quiet:
-                console.print("\n[yellow]Interrupted. Use --stop or Ctrl+C again to quit.[/yellow]")
+                console.print("\n[yellow]Interrupted. Ctrl+C again to quit.[/yellow]")
             _cancel_current_turn()
             turn_stop.set()
         else:
-            LOGGER.info("Second SIGINT -- shutting down")
+            LOGGER.info("SIGINT -- shutting down")
             if not quiet:
                 console.print("\n[yellow]Shutting down...[/yellow]")
             _cancel_current_turn()
@@ -516,7 +464,6 @@ async def _async_main(  # noqa: PLR0912, PLR0915
                             system_prompt=SYSTEM_PROMPT,
                             agent_instructions=AGENT_INSTRUCTIONS,
                             on_state_change=_set_state,
-                            capture_screen_fn=_maybe_capture_screen,
                         )
                     )
                     current_turn_task[0] = turn_task

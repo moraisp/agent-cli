@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import io
 import wave
+from contextlib import suppress
 from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
@@ -256,7 +257,8 @@ async def _send_audio(
             progress_style="blue",
         )
     finally:
-        await client.write_event(AudioStop().event())
+        with suppress(Exception):
+            await client.write_event(AudioStop().event())
         logger.debug("Sent AudioStop")
         seconds_sent = bytes_sent / (constants.AUDIO_RATE * constants.AUDIO_CHANNELS * 2)
         logger.info(

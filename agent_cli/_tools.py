@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import shutil
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -11,6 +13,13 @@ from typing import TYPE_CHECKING, Any, TypeVar
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+LOGGER = logging.getLogger(__name__)
+
+# Module-level storage for a screenshot captured by the capture_screen tool.
+# After get_llm_response completes, callers should check and clear this via
+# get_and_clear_screenshot() to attach the image in a follow-up LLM call.
+_captured_screenshot: bytes | None = None
 
 
 # Memory system helpers
@@ -351,6 +360,118 @@ def list_memory_categories() -> str:
     return _memory_operation("listing categories", _list_categories_operation)
 
 
+def copy_to_clipboard(text: str) -> str:
+    """Copy text to the system clipboard.
+
+    Use this tool when the user asks you to:
+    - Write, generate, or give them a command, snippet, URL, or any text
+    - Copy something to the clipboard
+    - Prepare text they can paste somewhere
+
+    Args:
+        text: The exact text to place in the clipboard.
+
+    Returns:
+        Confirmation message with the copied text.
+
+    """
+    LOGGER.info("copy_to_clipboard called with %d chars: %r", len(text), text[:200])
+
+    # Wayland
+    wl_copy = shutil.which("wl-copy")
+    if wl_copy is not None:
+        try:
+            result = subprocess.run(
+                [wl_copy],
+                input=text,
+                text=True,
+                check=True,
+                capture_output=True,
+                env={**os.environ},
+            )
+            LOGGER.info("wl-copy succeeded")
+            if result.stderr:
+                LOGGER.warning("wl-copy stderr: %s", result.stderr)
+            return f"Copied to clipboard: {text}"
+        except subprocess.CalledProcessError as e:
+            LOGGER.error("wl-copy failed: %s", e.stderr)
+            return f"Error copying to clipboard: {e.stderr}"
+
+    # X11
+    xclip = shutil.which("xclip")
+    if xclip is not None:
+        try:
+            subprocess.run(
+                [xclip, "-selection", "clipboard"],
+                input=text,
+                text=True,
+                check=True,
+                capture_output=True,
+            )
+            LOGGER.info("xclip succeeded")
+            return f"Copied to clipboard: {text}"
+        except subprocess.CalledProcessError as e:
+            LOGGER.error("xclip failed: %s", e.stderr)
+            return f"Error copying to clipboard: {e.stderr}"
+
+    # Fallback: pyperclip
+    try:
+        import pyperclip  # noqa: PLC0415
+
+        pyperclip.copy(text)
+        LOGGER.info("pyperclip succeeded")
+        return f"Copied to clipboard: {text}"
+    except Exception as e:
+        LOGGER.error("pyperclip failed: %s", e)
+        return f"Error copying to clipboard: {e}"
+
+
+def capture_screen() -> str:
+    """Capture the user's screen so you can see what they are looking at.
+
+    Use this tool when the user asks you to:
+    - Look at, see, or read something on their screen
+    - Describe what is displayed
+    - Answer a question about something visible on the screen
+    - Analyze or help with content currently shown
+
+    After calling this tool, you will receive the screenshot in a follow-up
+    message. Wait for it before describing what you see.
+
+    Returns:
+        Confirmation that the screenshot was captured.
+
+    """
+    global _captured_screenshot  # noqa: PLW0603
+
+    grim = shutil.which("grim")
+    if grim is not None:
+        result = subprocess.run([grim, "-"], capture_output=True, check=False)
+        if result.returncode == 0 and result.stdout:
+            _captured_screenshot = result.stdout
+            LOGGER.info("Screen captured via grim: %d bytes", len(result.stdout))
+            return "Screenshot captured. Analyzing now."
+
+    scrot = shutil.which("scrot")
+    if scrot is not None:
+        result = subprocess.run([scrot, "-"], capture_output=True, check=False)
+        if result.returncode == 0 and result.stdout:
+            _captured_screenshot = result.stdout
+            LOGGER.info("Screen captured via scrot: %d bytes", len(result.stdout))
+            return "Screenshot captured. Analyzing now."
+
+    LOGGER.warning("No screenshot tool found (tried grim, scrot)")
+    return "Failed to capture screen. No screenshot tool available."
+
+
+def get_and_clear_screenshot() -> bytes | None:
+    """Return and clear any screenshot captured during the last tool run."""
+    global _captured_screenshot  # noqa: PLW0603
+    data = _captured_screenshot
+    _captured_screenshot = None
+    return data
+
+
 def tools() -> list:
     """Return a list of tools."""
     from pydantic_ai.common_tools.duckduckgo import duckduckgo_search_tool  # noqa: PLC0415
@@ -364,5 +485,7 @@ def tools() -> list:
         Tool(update_memory),
         Tool(list_all_memories),
         Tool(list_memory_categories),
+        Tool(copy_to_clipboard),
+        Tool(capture_screen),
         duckduckgo_search_tool(),
     ]
