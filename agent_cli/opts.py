@@ -353,6 +353,14 @@ LISTEN_STOP: bool = typer.Option(
     "Use with --listen for push-to-talk (key-down=listen, key-up=listen-stop).",
     rich_help_panel="Process Management",
 )
+LISTEN_TOGGLE: bool = typer.Option(
+    False,  # noqa: FBT003
+    "--listen-toggle",
+    help="Toggle listening in the running background-chat process. "
+    "If currently listening, stops recording; otherwise starts listening. "
+    "Bind a single key to this for a tap-to-talk workflow.",
+    rich_help_panel="Process Management",
+)
 
 # --- General Options ---
 

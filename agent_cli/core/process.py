@@ -162,6 +162,40 @@ def clear_listen_stop_file(process_name: str) -> None:
         f.unlink()
 
 
+def _get_state_file(process_name: str) -> Path:
+    """Get the path to the state file for a given process name."""
+    PID_DIR.mkdir(parents=True, exist_ok=True)
+    return PID_DIR / f"{process_name}.state"
+
+
+def write_state(process_name: str, state: str) -> None:
+    """Write the current state to a state file."""
+    _get_state_file(process_name).write_text(state)
+
+
+def read_state(process_name: str) -> str | None:
+    """Read the current state from the state file, or None if not available."""
+    f = _get_state_file(process_name)
+    try:
+        return f.read_text().strip()
+    except FileNotFoundError:
+        return None
+
+
+def trigger_listen_toggle(process_name: str) -> bool:
+    """Toggle listening in a running background-chat process.
+
+    If the process is currently listening, sends SIGUSR2 (stop recording).
+    Otherwise sends SIGUSR1 (start recording).
+
+    Returns True if the trigger was sent successfully.
+    """
+    state = read_state(process_name)
+    if state == "listening":
+        return trigger_listen_stop(process_name)
+    return trigger_listen(process_name)
+
+
 def _is_pid_running(pid: int) -> bool:
     """Check if a process with the given PID is running."""
     if sys.platform == "win32":
@@ -294,3 +328,4 @@ def pid_file_context(process_name: str) -> Generator[Path, None, None]:
         if pid_file.exists():
             pid_file.unlink()
         clear_stop_file(process_name)
+        _get_state_file(process_name).unlink(missing_ok=True)

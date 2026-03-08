@@ -468,10 +468,17 @@ async def manage_send_receive_tasks(
     send_task = asyncio.create_task(send_task_coro)
     recv_task = asyncio.create_task(receive_task_coro)
 
-    _done, pending = await asyncio.wait(
-        [send_task, recv_task],
-        return_when=return_when,
-    )
+    try:
+        _done, pending = await asyncio.wait(
+            [send_task, recv_task],
+            return_when=return_when,
+        )
+    except BaseException:
+        # CancelledError (or other): cancel inner tasks before propagating so
+        # they don't keep the audio device or Wyoming connection open.
+        send_task.cancel()
+        recv_task.cancel()
+        raise
 
     # Cancel any pending tasks
     for task in pending:

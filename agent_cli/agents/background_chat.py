@@ -68,33 +68,26 @@ NOTIFICATION_REPLACE_ID = "38291"
 ACTIVE_NOTIFICATION_TIMEOUT_MS = 86_400_000
 
 SYSTEM_PROMPT = """\
-You are a voice assistant. Your responses will be spoken aloud via text-to-speech.
+You are a voice assistant. Your output is read aloud by text-to-speech.
 
-Strict output rules:
-- Plain text only. Never use markdown, bullet points, numbered lists, headings, bold, italics, code blocks, or any formatting.
-- Never use special characters like asterisks, hashes, backticks, brackets, or parenthetical asides.
-- Never use emojis or emoticons.
-- Write numbers as spoken words when short (e.g. "three" not "3"), but use digits for long numbers or dates.
-- Never produce tables, columns, or any structured layout.
+ABSOLUTE RULES (violating any of these is a failure):
+1. MAXIMUM TWO SENTENCES per response. No exceptions. Ever.
+2. ZERO formatting. No markdown, no bullets, no lists, no headings, no bold, no italics, no code blocks. Plain text only.
+3. ZERO emojis or emoticons. Absolutely forbidden. Not a single one.
+4. ZERO special characters used for formatting: no asterisks, hashes, backticks, brackets, dashes used as bullets.
+5. Go directly to the answer. Do not restate the question. Do not add filler, preamble, or pleasantries.
+6. Never ask follow-up questions like "Want to know more?" or "Anything else?".
+7. Write numbers as spoken words when short (e.g. "three" not "3"), use digits for long numbers.
 
-Response style:
-- Be extremely concise. Answer in one or two short sentences when possible.
-- Go straight to the answer. Do not restate or paraphrase the question.
-- Speak naturally, as a person would in conversation.
-- Do not end with follow-up questions like "Want to know more?" or "How can I help?".
+If you can answer in one word, answer in one word. If you need a sentence, use one. Two sentences is the hard ceiling.
 
-Examples:
-Q: How many r's in strawberry?
-A: Three.
-
-Q: What's the capital of France?
-A: Paris.
-
-Q: What's 15 percent of 200?
-A: Thirty.
-
-Q: Explain what a black hole is.
-A: It's a region in space where gravity is so strong that nothing, not even light, can escape.
+Examples of correct responses:
+Q: How many r's in strawberry? A: Three.
+Q: What's the capital of France? A: Paris.
+Q: What's 15 percent of 200? A: Thirty.
+Q: Hello! A: Hi!
+Q: Explain what a black hole is. A: A region in space where gravity is so strong nothing can escape, not even light.
+Q: How do I make pasta? A: Boil salted water, cook the pasta until al dente, then drain and sauce it.
 
 You have access to the following tools:
 - read_file: Read the content of a file.
@@ -118,8 +111,62 @@ The user's current message is in the <user-message> tag.
 
 If the message continues the previous conversation, use that context.
 If it is a new topic, ignore the previous conversation.
-Answer directly and concisely. Your response will be read aloud.
+Respond in one or two sentences maximum. No formatting, no emojis, plain text only.
+If an image is attached, use it to answer the user's question. Describe only what is asked about.
 """
+
+# Regex matching voice commands that request vision / screen reading.
+_VISION_PATTERN = re.compile(
+    r"\b(?:see|look|look at|read this|read that|what(?:'s| is) (?:this|that|on (?:my |the )?screen)"
+    r"|show me|what do you see|what am i looking at|describe (?:this|that|the screen|what you see))\b",
+    re.IGNORECASE,
+)
+
+
+def _needs_vision(text: str) -> bool:
+    """Return True if the transcribed text implies the user wants screen analysis."""
+    return _VISION_PATTERN.search(text) is not None
+
+
+def _capture_screen() -> bytes | None:
+    """Capture the screen and return PNG bytes, or None on failure."""
+    grim = shutil.which("grim")
+    if grim is not None:
+        # Wayland -- grim writes PNG to stdout with "-"
+        result = subprocess.run(
+            [grim, "-"],
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode == 0 and result.stdout:
+            return result.stdout
+
+    scrot = shutil.which("scrot")
+    if scrot is not None:
+        # X11 -- scrot writes PNG to stdout with "-"
+        result = subprocess.run(
+            [scrot, "-"],
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode == 0 and result.stdout:
+            return result.stdout
+
+    LOGGER.warning("No screenshot tool found (tried grim, scrot)")
+    return None
+
+
+def _maybe_capture_screen(text: str) -> bytes | None:
+    """Capture the screen if the transcribed text implies a vision request."""
+    if not _needs_vision(text):
+        return None
+    LOGGER.info("Vision trigger detected in: %r -- capturing screen", text)
+    screenshot = _capture_screen()
+    if screenshot is None:
+        LOGGER.warning("Screen capture failed or no tool available")
+    else:
+        LOGGER.info("Screen captured: %d bytes", len(screenshot))
+    return screenshot
 
 
 class _BackgroundChatNotifier:
@@ -149,7 +196,7 @@ class _BackgroundChatNotifier:
             command[1:1] = ["-r", NOTIFICATION_REPLACE_ID]
 
         with suppress(Exception):
-            result = subprocess.run(
+            subprocess.run(
                 command,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -225,28 +272,34 @@ class _BackgroundChatNotifier:
     def dismiss(self) -> None:
         if self._notification_id is None:
             return
-        if self._gdbus is None:
-            self._notification_id = None
-            return
-
-        with suppress(Exception):
-            subprocess.run(
-                [
-                    self._gdbus,
-                    "call",
-                    "--session",
-                    "--dest",
-                    "org.freedesktop.Notifications",
-                    "--object-path",
-                    "/org/freedesktop/Notifications",
-                    "--method",
-                    "org.freedesktop.Notifications.CloseNotification",
-                    str(self._notification_id),
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-            )
+        if self._gdbus is not None:
+            with suppress(Exception):
+                subprocess.run(
+                    [
+                        self._gdbus,
+                        "call",
+                        "--session",
+                        "--dest",
+                        "org.freedesktop.Notifications",
+                        "--object-path",
+                        "/org/freedesktop/Notifications",
+                        "--method",
+                        "org.freedesktop.Notifications.CloseNotification",
+                        str(self._notification_id),
+                    ],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
+        elif self._command is not None and self._command.endswith("dunstify"):
+            # dunstify supports -C <id> to close a notification by ID
+            with suppress(Exception):
+                subprocess.run(
+                    [self._command, "-C", str(self._notification_id)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    check=False,
+                )
         self._notification_id = None
 
     def update(self, state: str) -> None:
@@ -265,27 +318,42 @@ class _BackgroundChatNotifier:
 
 
 @contextmanager
-def _signal_handling_context(
+def _signal_handling_context(  # noqa: PLR0915
     loop: asyncio.AbstractEventLoop,
     listen_event: asyncio.Event,
     global_stop: asyncio.Event,
     turn_stop: InteractiveStopEvent,
     quiet: bool,
+    current_turn_task: list,
+    set_state: Callable[[str], None],
 ) -> Generator[Callable[[], None], None, None]:
     """Register SIGUSR1/SIGTERM/SIGINT handlers for background-chat."""
     sigint_count = [0]
 
+    def _cancel_current_turn() -> None:
+        task = current_turn_task[0]
+        if task is not None and not task.done():
+            LOGGER.info("Cancelling current turn task")
+            task.cancel()
+
     def _sigusr1() -> None:
         LOGGER.info("SIGUSR1 received -- triggering listen session")
+        # Cancel the running turn at whatever stage it's in (recording, waiting
+        # for ASR transcript, LLM, or TTS) so we can start fresh immediately.
+        _cancel_current_turn()
         turn_stop.set()
         listen_event.set()
 
     def _sigusr2() -> None:
         LOGGER.info("SIGUSR2 received -- stop recording (push-to-talk key-up)")
         turn_stop.set()
+        # Update notification immediately: recording has stopped, we're now
+        # waiting for the ASR server to return the transcript.
+        set_state("thinking")
 
     def _sigterm() -> None:
         LOGGER.info("SIGTERM received -- shutting down")
+        _cancel_current_turn()
         global_stop.set()
         turn_stop.set()
         listen_event.set()
@@ -299,11 +367,13 @@ def _signal_handling_context(
             LOGGER.info("First SIGINT -- interrupting current turn, returning to idle (Ctrl+C again or --stop to quit)")
             if not quiet:
                 console.print("\n[yellow]Interrupted. Use --stop or Ctrl+C again to quit.[/yellow]")
+            _cancel_current_turn()
             turn_stop.set()
         else:
             LOGGER.info("Second SIGINT -- shutting down")
             if not quiet:
                 console.print("\n[yellow]Shutting down...[/yellow]")
+            _cancel_current_turn()
             global_stop.set()
             turn_stop.set()
             listen_event.set()
@@ -343,7 +413,7 @@ async def _wait_for_listen(
         await asyncio.sleep(0.1)
 
 
-async def _async_main(
+async def _async_main(  # noqa: PLR0912, PLR0915
     *,
     provider_cfg: config.ProviderSelection,
     general_cfg: config.General,
@@ -373,7 +443,7 @@ async def _async_main(
     # Load conversation history (shared with `chat` by default)
     conversation_history = []
     if history_cfg.history_dir:
-        history_path = Path(history_cfg.history_dir).expanduser()  # noqa: ASYNC240
+        history_path = Path(history_cfg.history_dir).expanduser()
         history_path.mkdir(parents=True, exist_ok=True)
         os.environ["AGENT_CLI_HISTORY_DIR"] = str(history_path)
         history_file = history_path / "conversation.json"
@@ -387,6 +457,7 @@ async def _async_main(
 
     def _set_state(state: str) -> None:
         notifier.update(state)
+        process.write_state(PROCESS_NAME, state)
 
     pid = process.read_pid_file(PROCESS_NAME)
     if not general_cfg.quiet:
@@ -396,8 +467,13 @@ async def _async_main(
             style="blue",
         )
 
+    current_turn_task: list[asyncio.Task | None] = [None]
+
     with (
-        _signal_handling_context(loop, listen_event, global_stop, turn_stop, general_cfg.quiet) as reset_sigint_count,
+        _signal_handling_context(
+            loop, listen_event, global_stop, turn_stop, general_cfg.quiet,
+            current_turn_task, _set_state,
+        ) as reset_sigint_count,
         maybe_live(not general_cfg.quiet) as live,
     ):
         try:
@@ -415,29 +491,36 @@ async def _async_main(
                 turn_stop.clear()
 
                 try:
-                    await _handle_conversation_turn(
-                        stop_event=turn_stop,
-                        conversation_history=conversation_history,
-                        provider_cfg=provider_cfg,
-                        general_cfg=general_cfg,
-                        history_cfg=history_cfg,
-                        audio_in_cfg=audio_in_cfg,
-                        wyoming_asr_cfg=wyoming_asr_cfg,
-                        openai_asr_cfg=openai_asr_cfg,
-                        gemini_asr_cfg=gemini_asr_cfg,
-                        ollama_cfg=ollama_cfg,
-                        openai_llm_cfg=openai_llm_cfg,
-                        gemini_llm_cfg=gemini_llm_cfg,
-                        audio_out_cfg=audio_out_cfg,
-                        wyoming_tts_cfg=wyoming_tts_cfg,
-                        openai_tts_cfg=openai_tts_cfg,
-                        kokoro_tts_cfg=kokoro_tts_cfg,
-                        gemini_tts_cfg=gemini_tts_cfg,
-                        live=live,
-                        system_prompt=SYSTEM_PROMPT,
-                        agent_instructions=AGENT_INSTRUCTIONS,
-                        on_state_change=_set_state,
+                    # Wrap in a Task so SIGUSR1 can cancel it at any await point
+                    # (including while waiting for ASR transcript, LLM, or TTS).
+                    turn_task = asyncio.create_task(
+                        _handle_conversation_turn(
+                            stop_event=turn_stop,
+                            conversation_history=conversation_history,
+                            provider_cfg=provider_cfg,
+                            general_cfg=general_cfg,
+                            history_cfg=history_cfg,
+                            audio_in_cfg=audio_in_cfg,
+                            wyoming_asr_cfg=wyoming_asr_cfg,
+                            openai_asr_cfg=openai_asr_cfg,
+                            gemini_asr_cfg=gemini_asr_cfg,
+                            ollama_cfg=ollama_cfg,
+                            openai_llm_cfg=openai_llm_cfg,
+                            gemini_llm_cfg=gemini_llm_cfg,
+                            audio_out_cfg=audio_out_cfg,
+                            wyoming_tts_cfg=wyoming_tts_cfg,
+                            openai_tts_cfg=openai_tts_cfg,
+                            kokoro_tts_cfg=kokoro_tts_cfg,
+                            gemini_tts_cfg=gemini_tts_cfg,
+                            live=live,
+                            system_prompt=SYSTEM_PROMPT,
+                            agent_instructions=AGENT_INSTRUCTIONS,
+                            on_state_change=_set_state,
+                            capture_screen_fn=_maybe_capture_screen,
+                        )
                     )
+                    current_turn_task[0] = turn_task
+                    await turn_task
                     LOGGER.info("Conversation turn completed normally")
                 except asyncio.CancelledError:
                     LOGGER.info("CancelledError during turn -- resuming idle state")
@@ -448,6 +531,7 @@ async def _async_main(
                     if not general_cfg.quiet:
                         print_with_style(f"Turn failed ({type(exc).__name__}), resuming idle.", style="yellow")
                 finally:
+                    current_turn_task[0] = None
                     turn_stop.clear()
                     reset_sigint_count()
 
@@ -511,6 +595,7 @@ def background_chat(
     toggle: bool = opts.TOGGLE,
     listen: bool = opts.LISTEN,
     listen_stop: bool = opts.LISTEN_STOP,
+    listen_toggle: bool = opts.LISTEN_TOGGLE,
     # --- History Options ---
     history_dir: Path = typer.Option(  # noqa: B008
         "~/.config/agent-cli/history",
@@ -608,6 +693,18 @@ def background_chat(
         if process.trigger_listen_stop(PROCESS_NAME):
             if not general_cfg.quiet:
                 print_with_style("Listen stop triggered.", style="blue")
+        elif not general_cfg.quiet:
+            print_with_style(
+                "No background-chat process is running. "
+                "Start one first with: agent-cli background-chat",
+                style="yellow",
+            )
+        return
+
+    if listen_toggle:
+        if process.trigger_listen_toggle(PROCESS_NAME):
+            if not general_cfg.quiet:
+                print_with_style("Listen toggle triggered.", style="blue")
         elif not general_cfg.quiet:
             print_with_style(
                 "No background-chat process is running. "

@@ -12,8 +12,10 @@ from agent_cli.core.utils import console, live_timer, print_error_message, print
 
 if TYPE_CHECKING:
     import logging
+    from collections.abc import Sequence
 
     from pydantic_ai import Agent
+    from pydantic_ai.messages import UserContent
     from pydantic_ai.models.gemini import GeminiModel
     from pydantic_ai.models.openai import OpenAIModel
     from pydantic_ai.tools import Tool
@@ -109,7 +111,7 @@ async def get_llm_response(
     *,
     system_prompt: str,
     agent_instructions: str,
-    user_input: str,
+    user_input: str | Sequence[UserContent],
     provider_cfg: config.ProviderSelection,
     ollama_cfg: config.Ollama,
     openai_cfg: config.OpenAILLM,

@@ -172,6 +172,7 @@ async def _handle_conversation_turn(
     system_prompt: str = SYSTEM_PROMPT,
     agent_instructions: str = AGENT_INSTRUCTIONS,
     on_state_change: Callable[[str], None] | None = None,
+    capture_screen_fn: Callable[[str], bytes | None] | None = None,
 ) -> None:
     """Handles a single turn of the conversation."""
     if on_state_change is not None:
@@ -232,6 +233,18 @@ async def _handle_conversation_turn(
         instruction=instruction,
     )
 
+    # Build multimodal prompt if a screenshot is attached
+    screenshot = capture_screen_fn(instruction) if capture_screen_fn is not None else None
+    if screenshot is not None:
+        from pydantic_ai import BinaryContent  # noqa: PLC0415
+
+        user_input: str | list = [
+            user_message_with_context,
+            BinaryContent(data=screenshot, media_type="image/png"),
+        ]
+    else:
+        user_input = user_message_with_context
+
     # 4. Get LLM response with timing
     if on_state_change is not None:
         on_state_change("thinking")
@@ -254,7 +267,7 @@ async def _handle_conversation_turn(
         response_text = await get_llm_response(
             system_prompt=system_prompt,
             agent_instructions=agent_instructions,
-            user_input=user_message_with_context,
+            user_input=user_input,
             provider_cfg=provider_cfg,
             ollama_cfg=ollama_cfg,
             openai_cfg=openai_llm_cfg,
