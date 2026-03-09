@@ -416,11 +416,14 @@ def read_clipboard() -> str:
 def capture_screen() -> str:
     """Capture the user's screen so you can see what they are looking at.
 
-    Use this tool when the user asks you to:
-    - Look at, see, or read something on their screen
-    - Describe what is displayed
-    - Answer a question about something visible on the screen
-    - Analyze or help with content currently shown
+    You MUST call this tool when the user:
+    - Mentions their screen, a photo, image, or text visible on screen
+    - Asks you to look at, see, or read something on their screen
+    - Asks about something visible or currently displayed
+    - Wants you to analyze or help with content currently shown
+
+    Call this tool FIRST before responding about any on-screen content.
+    Do not describe what you would do -- just call it immediately.
 
     After calling this tool, you will receive the screenshot in a follow-up
     message. Wait for it before describing what you see.
